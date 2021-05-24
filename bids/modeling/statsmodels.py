@@ -14,6 +14,7 @@ from bids.variables import (BIDSVariableCollection, SparseRunVariable,
                             merge_collections)
 from bids.modeling import transformations as tm
 from .model_spec import create_model_spec
+import warnings
 
 
 # Only entities in this list can be used in grouping
@@ -46,6 +47,23 @@ def validate_model(model):
             if edge['destination'] not in names:
                 raise ValueError("Missing destination node: '{}'".format(
                     edge['destination']))
+
+    # XXX: May 2021: Helping old models to work. This shouldn't last more than 2 years.
+    for node in model["nodes"]:
+        if "type" in node.get("dummy_contrasts", {}):
+            warnings.warn(f"[Node {node['name']}]: Contrast 'Type' is now 'Test'.")
+            node["dummy_contrasts"]["test"] = node["dummy_contrasts"].pop("type")
+        for contrast in node.get("contrasts", []):
+            if "type" in contrast:
+                warnings.warn(f"[Node {node['name']}; Contrast {contrast['name']}]:"
+                              "Contrast 'Type' is now 'Test'.")
+                contrast["test"] = contrast.pop("type")
+        if isinstance(node.get("transformations"), list):
+            transformations = {"transformer": "pybids-transforms-v1",
+                               "instructions": node["transformations"]}
+            warnings.warn(f"[Node {node['name']}]:"
+                          f"Transformations reformatted to {transformations}")
+            node["transformations"] = transformations
     return True
 
 
@@ -54,7 +72,7 @@ BIDSStatsModelsEdge = namedtuple('BIDSStatsModelsEdge',
 
 
 ContrastInfo = namedtuple('ContrastInfo', ('name', 'conditions', 'weights',
-                                           'type', 'entities'))
+                                           'test', 'entities'))
 
 
 class BIDSStatsModelsGraph:
@@ -199,16 +217,19 @@ class BIDSStatsModelsNode:
         ['run', 'session', 'subject', or 'dataset'].
     name : str
         Name to assign to the node.
-    transformations : list
-        List of BIDS-Model transformations to apply.
     model : dict
         The 'model' part of the BIDS-StatsModels specification.
+    transformations : dict
+        Optional dictionary specifying transformations to apply. Dictionary
+        must include "transformer" and "instructions" keys. "transformer"
+        indicates the specification to follow. "instructions" is a list of
+        instructions matching that specification.
     contrasts : list
         List of contrasts to apply to the parameter estimates generated when
         the model is fit.
     dummy_contrasts : dict
         Optional dictionary specifying which conditions to create indicator
-        contrasts for. Dictionary must include a "type" key ('t' or 'FEMA'),
+        contrasts for. Dictionary may include a "test" key ('t'),
         and optionally a subset of "conditions".
     group_by: [str]
         Optional list of strings giving the names of entities that define the
@@ -225,7 +246,10 @@ class BIDSStatsModelsNode:
         self.level = level.lower()
         self.name = name
         self.model = model or {}
-        self.transformations = transformations or []
+        if transformations is None:
+            transformations = {"transformer": "pybids-transforms-v1",
+                               "instructions": []}
+        self.transformations = transformations
         self.contrasts = contrasts or []
         self.dummy_contrasts = dummy_contrasts
         self.group_by = group_by or []
@@ -580,7 +604,8 @@ class BIDSStatsModelsNodeOutput:
             # apply transformations
             transformations = self.node.transformations
             if transformations:
-                coll = tm.TransformerManager().transform(coll.clone(), transformations)
+                transformer = tm.TransformerManager(transformations['transformer'])
+                coll = transformer.transform(coll.clone(), transformations['instructions'])
 
             # retain only variables listed in 'X', and skip level if none are left.
             tm.Select(coll, var_names)
@@ -627,11 +652,10 @@ class BIDSStatsModelsNodeOutput:
                 elif self.invalid_contrasts == 'drop':
                     continue
             weights = np.atleast_2d(con['weights'])
-            test_type = con.get('type', ('t' if len(weights) == 1 else 'F'))
             # Add contrast name to entities; can be used in grouping downstream
             entities = {**self.entities, 'contrast': con['name']}
             ci = ContrastInfo(con['name'], con['condition_list'],
-                              con['weights'], test_type, entities)
+                              con['weights'], con.get("test"), entities)
             contrasts[con['name']] = ci
 
         dummies = self.node.dummy_contrasts
@@ -645,7 +669,7 @@ class BIDSStatsModelsNodeOutput:
                 if col_name in contrasts:
                     continue
                 entities = {**self.entities, 'contrast': col_name}
-                ci = ContrastInfo(col_name, [col_name], [1], dummies['type'],
+                ci = ContrastInfo(col_name, [col_name], [1], dummies.get("test"),
                                   entities)
                 contrasts[col_name] = ci
 
